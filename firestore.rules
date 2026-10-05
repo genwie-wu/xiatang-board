@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function signedIn() { return request.auth != null; }
+    function isOwner() {
+      return signedIn() && request.auth.token.email == 'genwie@gmail.com' && request.auth.token.email_verified == true;
+    }
+    function hasProfile() { return signedIn() && exists(/databases/$(db)/documents/users/$(request.auth.uid)); }
+    function role() { return get(/databases/$(db)/documents/users/$(request.auth.uid)).data.role; }
+    function isAdmin() { return isOwner() || (hasProfile() && role() == 'admin'); }
+    function isMember() { return isAdmin() || (hasProfile() && role() in ['xiatang', 'bokezhu']); }
+    function canEditDeals() { return isAdmin() || (hasProfile() && role() == 'bokezhu'); }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if signedIn() && request.auth.uid == uid
+        && (request.resource.data.role == 'pending' || (request.resource.data.role == 'admin' && isOwner()));
+      allow update: if isAdmin()
+        || (signedIn() && request.auth.uid == uid && request.resource.data.role == resource.data.role);
+      allow delete: if isAdmin();
+    }
+    match /deals/{id} {
+      allow read: if isMember();
+      allow write: if canEditDeals();
+    }
+    match /links/{id} {
+      allow read: if isMember();
+      allow write: if isAdmin();
+    }
+    match /settings/{id} {
+      allow read: if isMember();
+      allow write: if isAdmin();
+    }
+    match /payments/{id} { allow read, write: if isAdmin(); }
+    match /expenses/{id} { allow read, write: if isAdmin(); }
+    match /quarters/{id} { allow read, write: if isAdmin(); }
+  }
+}
