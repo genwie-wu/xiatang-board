@@ -913,7 +913,7 @@ async function syncCalendar(deal, episodes, removed, token) {
     const tag = sorted.length > 1 ? ` 第${i}集` : "";
     const ids = { ...(ep.cal || {}) };
     const specs = [
-      ["air", { summary: `【上線】${deal.brand}${tag}`, start: { dateTime: `${ep.airDate}T00:00:00+08:00`, timeZone: "Asia/Taipei" }, end: { dateTime: `${ep.airDate}T00:30:00+08:00`, timeZone: "Asia/Taipei" } }],
+      ["air", { summary: `【上線】${deal.brand}${tag}`, start: { date: ep.airDate }, end: { date: addDays(ep.airDate, 1) } }],
       ["script", { summary: `【口播稿截止】${deal.brand}${tag}`, start: { date: ep.scriptDue }, end: { date: addDays(ep.scriptDue, 1) } }],
       ["cut", { summary: `【初剪截止】${deal.brand}${tag}`, start: { date: ep.roughCutDue }, end: { date: addDays(ep.roughCutDue, 1) } }],
     ];

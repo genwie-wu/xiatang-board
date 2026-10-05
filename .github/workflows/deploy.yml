@@ -1,0 +1,23 @@
+# 每次更新程式（推送到 main）就自動把網站與資料庫權限規則上傳到 Firebase
+name: 上傳到 Firebase
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 部署網站與權限規則
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then echo "::warning::尚未設定 FIREBASE_SERVICE_ACCOUNT 金鑰，略過上傳"; exit 0; fi
+          echo "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          npx --yes firebase-tools@latest deploy --only hosting,firestore:rules --project xiatang-board --non-interactive
+          rm -f "$RUNNER_TEMP/sa.json"
