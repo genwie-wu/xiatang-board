@@ -887,7 +887,7 @@ function getCalToken() {
         if (r.error) return rej(new Error(r.error_description || r.error));
         gisToken = r.access_token; gisExpiry = Date.now() + (r.expires_in || 3600) * 1000; res(gisToken);
       },
-      error_callback: (e) => rej(new Error(e?.type === "popup_closed" ? "你關閉了授權視窗" : e?.message || "授權失敗")),
+      error_callback: (e) => rej(new Error(e?.type === "popup_closed" ? "你關閉了授權視窗" : e?.type === "popup_failed_to_open" ? "瀏覽器擋住了 Google 授權視窗，請允許彈出視窗後，到合作頁按「重新同步 Google 日曆」" : e?.message || "授權失敗")),
     });
     tc.requestAccessToken({ prompt: "" });
   });
