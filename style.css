@@ -60,6 +60,7 @@ h1, h2, h3 { margin: 0; font-weight: 700; letter-spacing: .01em; }
 .google-btn:hover { border-color: var(--accent); }
 @media (max-width: 760px) {
   .splash { grid-template-columns: 1fr; grid-template-rows: 42vh auto; }
+  .splash-art { background-size: auto 165%; background-color: #d6e8f8; }
   .splash-panel { padding: 28px 20px 40px; }
 }
 
