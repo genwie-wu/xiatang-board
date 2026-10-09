@@ -31,7 +31,21 @@ service cloud.firestore {
       allow read: if isMember();
       allow write: if isAdmin();
     }
-    match /payments/{id} { allow read, write: if isAdmin(); }
+    match /payments/{id} {
+      allow read: if isMember();
+      allow write: if isAdmin();
+    }
+    // 通知：只看得到、只能標記已讀自己的；由伺服器程式建立
+    match /notifications/{id} {
+      allow read, delete: if signedIn() && resource.data.uid == request.auth.uid;
+      allow update: if signedIn() && resource.data.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+    }
+    // 推播權杖：每台裝置一筆，只能寫自己的
+    match /pushTokens/{id} {
+      allow create, update: if signedIn() && request.resource.data.uid == request.auth.uid;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
     match /expenses/{id} { allow read, write: if isAdmin(); }
     match /quarters/{id} { allow read, write: if isAdmin(); }
   }

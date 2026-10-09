@@ -3,9 +3,10 @@ import {
   getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
-  getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, addDoc, collection, onSnapshot, serverTimestamp, writeBatch,
+  getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, addDoc, collection, onSnapshot, serverTimestamp, writeBatch, query, where,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig, oauthClientId, ownerEmail } from "./config.js?v=1";
+import * as push from "./push.js?v=1";
 
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
@@ -80,6 +81,7 @@ const S = {
   payments: {},
   expenses: [],
   quarters: {},
+  notes: [],
   ui: {
     dealTab: "active",
     dealSort: "date",
@@ -87,6 +89,7 @@ const S = {
     incomeYm: ymOf(todayStr()),
     payQ: shiftQ(qKeyOf(todayStr()), -1),
     menu: false,
+    bell: false,
   },
   loaded: { deals: false },
 };
@@ -164,18 +167,25 @@ function renderShell(inner) {
       <a class="brand" href="#home"><img src="icons/icon-64.png" alt=""><span>夏躺工作表單</span></a>
       <nav class="nav">${nav}</nav>
       <div class="spacer"></div>
+      <button class="bell" id="bell-btn" aria-label="通知"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><span class="dot" id="bell-dot" hidden></span></button>
       <button class="me" id="me-btn" aria-label="帳號選單">
         <span class="role-pill">${ROLES[role()]}</span>
         ${u.photoURL ? `<img src="${esc(u.photoURL)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar"></span>`}
       </button>
       ${S.ui.menu ? `<div class="menu" id="menu">
           <div class="who"><div><b>${esc(u.displayName || "")}</b></div><div class="muted small">${esc(u.email)}</div><div class="small">${ROLES[role()]}</div></div>
+          <button id="open-notify">通知設定</button>
           <button id="logout">登出</button></div>` : ""}
+      ${S.ui.bell ? bellPanel() : ""}
     </div></header>
     <main class="main">${inner}</main>
     <nav class="bottom-nav">${bnav}</nav>`;
-  $("#me-btn").onclick = () => { S.ui.menu = !S.ui.menu; render(); };
-  const lo = $("#logout"); if (lo) lo.onclick = () => { S.ui.menu = false; signOut(auth); };
+  $("#me-btn").onclick = () => { S.ui.menu = !S.ui.menu; S.ui.bell = false; render(); };
+  $("#bell-btn").onclick = () => { S.ui.bell = !S.ui.bell; S.ui.menu = false; render(); };
+  const lo = $("#logout"); if (lo) lo.onclick = () => { S.ui.menu = false; logout(); };
+  const on = $("#open-notify"); if (on) on.onclick = () => { S.ui.menu = false; S.ui.bell = true; render(); };
+  bindBellPanel();
+  updateBell();
 }
 
 /* =========================================================
@@ -215,7 +225,7 @@ function renderPending() {
       <button class="btn" id="logout">登出</button>
     </div>
   </div>`;
-  $("#logout").onclick = () => signOut(auth);
+  $("#logout").onclick = () => logout();
 }
 
 /* =========================================================
@@ -270,6 +280,7 @@ function renderHome() {
       <div><h1>${esc((S.user.displayName || "").split(" ")[0] || "嗨")}，你好</h1><div class="sub">今天是 ${mdw(todayStr())}</div></div>
       ${canEdit() ? `<button class="btn primary lg" id="new-deal">＋ 新增合作</button>` : ""}
     </div>
+    ${pushPrompt()}
     <div class="grid cols-2">
       <div class="stat-hero">
         <div class="label">${+ym.slice(5)} 月截至今日結案收益（未稅）</div>
@@ -302,6 +313,7 @@ function renderHome() {
   $$("#sort-seg button").forEach((b) => (b.onclick = () => { S.ui.dealSort = b.dataset.v; render(); }));
   $$("[data-deal]").forEach((el) => (el.onclick = () => (location.hash = "#deal/" + el.dataset.deal)));
   const nb = $("#new-deal"); if (nb) nb.onclick = () => openDealForm();
+  bindPushPrompt();
 }
 
 /* =========================================================
@@ -352,13 +364,7 @@ function renderDeal(id) {
       </div>
       ${d.note ? `<div style="margin-top:14px"><div class="k small muted">備註</div><div style="white-space:pre-wrap">${esc(d.note)}</div></div>` : ""}
     </div>
-    ${isAdmin() ? `
-    <div class="section"><div class="section-title"><h2>入帳狀態</h2><span class="small muted">只有管理者看得到</span></div>
-      <div class="card pad btn-row">
-        <label class="toggle"><input type="checkbox" id="paid" ${pay.paid ? "checked" : ""}> 已入帳</label>
-        <input type="date" class="inline-input" id="paid-date" value="${esc(pay.paidDate || "")}" ${pay.paid ? "" : "disabled"} style="width:160px">
-      </div>
-    </div>` : ""}
+    ${billingBlock(d)}
     <div class="section"><div class="section-title"><h2>各集內容</h2>
       ${canEdit() && S.settings.calendarId ? `<button class="btn sm ghost" id="resync">重新同步 Google 日曆</button>` : ""}</div>
       <div class="grid">${epHtml}</div>
@@ -377,16 +383,64 @@ function renderDeal(id) {
       toast(res.errors.length ? "部分日曆事件同步失敗：" + res.errors[0] : "日曆已同步");
     };
   }
-  if (isAdmin()) {
-    const cb = $("#paid"), dt = $("#paid-date");
-    cb.onchange = async () => {
-      const paid = cb.checked;
-      const paidDate = paid ? dt.value || todayStr() : "";
-      await setDoc(doc(db, "payments", d.id), { paid, paidDate, brand: d.brand }, { merge: true });
-      toast(paid ? "已標記入帳" : "已改為未入帳");
-    };
-    dt.onchange = async () => { await setDoc(doc(db, "payments", d.id), { paidDate: dt.value }, { merge: true }); toast("入帳日已更新"); };
+  bindBilling(d);
+}
+
+/* =========================================================
+   發票與入帳（合作頁）
+   ========================================================= */
+function payBadges(p) {
+  return `<span class="tag ${p.invoiced ? "ok" : ""}">${p.invoiced ? `已開發票（${md(p.invoiceDate)}${p.invoiceNo ? "・" + esc(p.invoiceNo) : ""}）` : "尚未開發票"}</span>
+    <span class="tag ${p.paid ? "ok" : ""}">${p.paid ? `已入帳（${md(p.paidDate)}）` : "尚未入帳"}</span>`;
+}
+function billingBlock(d) {
+  const p = S.payments[d.id] || {};
+  const share = num(d.quote) * ratio();
+  const amounts = `<div class="kv" style="margin-bottom:14px">
+      <div><div class="k">應開發票金額（夏躺分潤，未稅）</div><div class="v">${money(share)}</div></div>
+      <div><div class="k">含 5% 營業稅</div><div class="v">${money(share * 1.05)}</div></div>
+    </div>`;
+  if (!isAdmin()) {
+    return `<div class="section"><div class="section-title"><h2>發票與入帳</h2><span class="small muted">由管理者更新</span></div>
+      <div class="card pad">${amounts}<div class="btn-row">${payBadges(p)}</div></div></div>`;
   }
+  return `<div class="section"><div class="section-title"><h2>發票與入帳</h2><span class="small muted">只有管理者能修改</span></div>
+    <div class="card pad">${amounts}
+      <div class="bill-row">
+        <label class="toggle"><input type="checkbox" id="inv" ${p.invoiced ? "checked" : ""}> 已開發票</label>
+        <input type="date" class="inline-input" id="inv-date" value="${esc(p.invoiceDate || "")}" ${p.invoiced ? "" : "disabled"} style="width:160px">
+        <input class="inline-input" id="inv-no" value="${esc(p.invoiceNo || "")}" placeholder="發票號碼（選填）" style="width:170px">
+      </div>
+      <div class="bill-row">
+        <label class="toggle"><input type="checkbox" id="paid" ${p.paid ? "checked" : ""}> 已入帳</label>
+        <input type="date" class="inline-input" id="paid-date" value="${esc(p.paidDate || "")}" ${p.paid ? "" : "disabled"} style="width:160px">
+      </div>
+      <p class="small muted" style="margin:10px 0 0">勾選「已開發票」後，夏躺人員與播客煮會收到通知。實際開立方式請以會計為準。</p>
+    </div></div>`;
+}
+const savePay = (d, patch) => setDoc(doc(db, "payments", d.id), { ...patch, brand: d.brand, updatedBy: S.user.email }, { merge: true });
+async function setInvoiced(d, on, cb) {
+  const p = S.payments[d.id] || {};
+  await savePay(d, { invoiced: on, invoiceDate: on ? (p.invoiceDate || todayStr()) : "" });
+  toast(on ? "已標記開發票" : "已改為未開發票");
+}
+async function setPaid(d, on, cb) {
+  const p = S.payments[d.id] || {};
+  if (on && !p.invoiced) {
+    const ok = await confirmBox("這筆還沒標記開發票", `「${esc(d.brand)}」還沒勾「已開發票」，仍要標記已入帳嗎？`, "仍要標記");
+    if (!ok) { if (cb) cb.checked = false; return; }
+  }
+  await savePay(d, { paid: on, paidDate: on ? (p.paidDate || todayStr()) : "" });
+  toast(on ? "已標記入帳" : "已改為未入帳");
+}
+function bindBilling(d) {
+  if (!isAdmin()) return;
+  const inv = $("#inv"), invDate = $("#inv-date"), invNo = $("#inv-no"), paid = $("#paid"), paidDate = $("#paid-date");
+  inv.onchange = () => setInvoiced(d, inv.checked, inv);
+  invDate.onchange = async () => { await savePay(d, { invoiceDate: invDate.value }); toast("開立日期已更新"); };
+  invNo.onchange = async () => { await savePay(d, { invoiceNo: invNo.value.trim() }); toast("發票號碼已儲存"); };
+  paid.onchange = () => setPaid(d, paid.checked, paid);
+  paidDate.onchange = async () => { await savePay(d, { paidDate: paidDate.value }); toast("入帳日已更新"); };
 }
 
 async function deleteDeal(d) {
@@ -395,6 +449,7 @@ async function deleteDeal(d) {
   let token = null;
   if (S.settings.calendarId && (d.episodes || []).some((e) => e.cal)) token = await getCalToken().catch(() => null);
   if (token) await syncCalendar(d, [], d.episodes || [], token).catch(() => {});
+  await updateDoc(doc(db, "deals", d.id), { deletedBy: S.user.email }).catch(() => {});
   await deleteDoc(doc(db, "deals", d.id));
   if (isAdmin()) await deleteDoc(doc(db, "payments", d.id)).catch(() => {});
   toast("已刪除");
@@ -687,14 +742,17 @@ function renderPayroll() {
   const dealRows = rel.map((d) => {
     const p = S.payments[d.id] || {};
     const st = airStatus(d);
-    const owed = !p.paid && dealAiredCount(d) > 0;
+    const aired = dealAiredCount(d) > 0;
+    const needInvoice = aired && !p.invoiced;
+    const waitPay = p.invoiced && !p.paid;
     const counts = p.paid && p.paidDate >= s && p.paidDate <= e;
-    return `<tr class="${owed ? "hl" : ""}">
+    return `<tr class="${needInvoice ? "hl" : waitPay ? "hl-blue" : ""}">
       <td><a href="#deal/${d.id}">${esc(d.brand)}</a></td>
       <td>${epsSorted(d).length} 集：${epsSorted(d).map((x) => md(x.airDate)).join("、")}</td>
       <td><span class="tag ${st.cls}">${st.text}</span></td>
       <td class="num">${money(num(d.quote) * r)}</td>
-      <td><label class="toggle"><input type="checkbox" data-paid="${d.id}" ${p.paid ? "checked" : ""} ${locked ? "disabled" : ""}> ${p.paid ? "已入帳" : owed ? "<b>待入帳</b>" : "未入帳"}</label></td>
+      <td><label class="toggle"><input type="checkbox" data-inv="${d.id}" ${p.invoiced ? "checked" : ""} ${locked ? "disabled" : ""}> ${p.invoiced ? `已開 ${md(p.invoiceDate)}` : needInvoice ? "<b>待開</b>" : "未開"}</label></td>
+      <td><label class="toggle"><input type="checkbox" data-paid="${d.id}" ${p.paid ? "checked" : ""} ${locked ? "disabled" : ""}> ${p.paid ? "已入帳" : waitPay ? "<b>等待入帳</b>" : "未入帳"}</label></td>
       <td><input type="date" class="inline-input" data-pdate="${d.id}" value="${esc(p.paidDate || "")}" ${p.paid && !locked ? "" : "disabled"} style="width:150px"></td>
       <td>${counts ? `<span class="tag ok">計入本季</span>` : p.paid ? `<span class="tag">計入 ${qKeyOf(p.paidDate)}</span>` : ""}</td>
     </tr>`;
@@ -707,8 +765,8 @@ function renderPayroll() {
     ${prevUnlocked && k !== prevK ? `<div class="banner"><span>上一季（${qLabel(prevK)}）還沒完成結算</span><button class="btn sm" id="goprev">前往結算</button></div>` : ""}
     ${locked ? `<div class="banner ok"><span>這一季已完成結算，數字已鎖定${qd.lockedAt?.toDate ? `（${md(fmtD(qd.lockedAt.toDate()))}）` : ""}</span><button class="btn sm" id="unlock">解鎖重算</button></div>` : ""}
 
-    <div class="section" style="margin-top:6px"><div class="section-title"><h2>業配明細</h2><span class="small muted">黃色底＝已上線但未入帳</span></div>
-      ${rel.length ? `<div class="card table-wrap"><table class="t"><thead><tr><th>品牌</th><th>集數與上線日</th><th>上線狀態</th><th class="num">夏躺分潤</th><th>入帳</th><th>入帳日</th><th></th></tr></thead><tbody>${dealRows}</tbody></table></div>` : `<div class="card empty">這一季沒有相關的業配</div>`}
+    <div class="section" style="margin-top:6px"><div class="section-title"><h2>業配明細</h2><span class="small muted"><span class="legend hl"></span>已上線、還沒開發票　<span class="legend hl-blue"></span>已開發票、等待入帳</span></div>
+      ${rel.length ? `<div class="card table-wrap"><table class="t"><thead><tr><th>品牌</th><th>集數與上線日</th><th>上線狀態</th><th class="num">夏躺分潤</th><th>發票</th><th>入帳</th><th>入帳日</th><th></th></tr></thead><tbody>${dealRows}</tbody></table></div>` : `<div class="card empty">這一季沒有相關的業配</div>`}
     </div>
 
     <div class="section"><div class="section-title"><h2>其他支出</h2></div>
@@ -754,20 +812,16 @@ function renderPayroll() {
   const lk = $("#lock");
   if (lk) lk.onclick = async () => {
     if (!(await confirmBox(`完成 ${qLabel(k)} 結算？`, `${esc(live.editorName)} 應付 ${money(live.editorPay)}、${esc(live.ownerName)} 應得 ${money(live.ownerPay)}。完成後數字會鎖定。`, "完成結算"))) return;
-    await setDoc(doc(db, "quarters", k), { locked: true, lockedAt: serverTimestamp(), snapshot: live }, { merge: true });
+    await setDoc(doc(db, "quarters", k), { locked: true, lockedAt: serverTimestamp(), lockedBy: S.user.email, snapshot: live }, { merge: true });
     toast("已完成結算");
   };
   const ec = $("#ep-count");
   if (ec) ec.onchange = () => setDoc(doc(db, "quarters", k), { episodeCount: Math.max(0, Math.round(num(ec.value))) }, { merge: true });
   const er = $("#ep-reset");
   if (er) er.onclick = (ev) => { ev.preventDefault(); setDoc(doc(db, "quarters", k), { episodeCount: null }, { merge: true }); };
-  $$("[data-paid]").forEach((cb) => (cb.onchange = async () => {
-    const id = cb.dataset.paid;
-    const d = S.deals.find((x) => x.id === id);
-    const paid = cb.checked;
-    await setDoc(doc(db, "payments", id), { paid, paidDate: paid ? (S.payments[id]?.paidDate || todayStr()) : "", brand: d?.brand || "" }, { merge: true });
-  }));
-  $$("[data-pdate]").forEach((inp) => (inp.onchange = () => setDoc(doc(db, "payments", inp.dataset.pdate), { paidDate: inp.value }, { merge: true })));
+  $$("[data-inv]").forEach((cb) => (cb.onchange = () => { const d = S.deals.find((x) => x.id === cb.dataset.inv); if (d) setInvoiced(d, cb.checked, cb); }));
+  $$("[data-paid]").forEach((cb) => (cb.onchange = () => { const d = S.deals.find((x) => x.id === cb.dataset.paid); if (d) setPaid(d, cb.checked, cb); }));
+  $$("[data-pdate]").forEach((inp) => (inp.onchange = () => setDoc(doc(db, "payments", inp.dataset.pdate), { paidDate: inp.value, updatedBy: S.user.email }, { merge: true })));
   $$("[data-delexp]").forEach((b) => (b.onclick = async () => {
     if (await confirmBox("刪除這筆支出？", "", "刪除", true)) await deleteDoc(doc(db, "expenses", b.dataset.delexp));
   }));
@@ -875,6 +929,7 @@ function loadGis() {
   return gisLoading;
 }
 loadGis().catch(() => {});
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 function getCalToken() {
   if (gisToken && Date.now() < gisExpiry - 60000) return Promise.resolve(gisToken);
   if (!window.google?.accounts?.oauth2) return loadGis().then(() => Promise.reject(new Error("授權元件剛載入完成，請再按一次")));
@@ -939,6 +994,92 @@ async function syncCalendar(deal, episodes, removed, token) {
 }
 
 /* =========================================================
+   通知：小鈴鐺、通知清單、這台裝置的推播開關
+   ========================================================= */
+const noteMs = (n) => (n.createdAt?.toDate ? n.createdAt.toDate().getTime() : 0);
+function ago(ms) {
+  if (!ms) return "";
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return "剛剛";
+  if (m < 60) return `${m} 分鐘前`;
+  if (m < 24 * 60) return `${Math.floor(m / 60)} 小時前`;
+  return md(fmtD(new Date(ms + 8 * 3600000)));
+}
+function updateBell() {
+  const dot = $("#bell-dot");
+  if (dot) dot.hidden = !S.notes.some((n) => !n.read);
+  if (S.ui.bell) { const list = $("#bell-list"); if (list) list.innerHTML = noteListHtml(); bindNoteItems(); }
+}
+function noteListHtml() {
+  if (!S.notes.length) return `<div class="empty small">還沒有通知</div>`;
+  return S.notes.map((n) => `<button class="note ${n.read ? "" : "unread"}" data-note="${n.id}">
+      <div class="note-title">${esc(n.title)}</div>
+      ${n.body ? `<div class="note-body">${esc(n.body)}</div>` : ""}
+      <div class="note-time">${ago(noteMs(n))}</div></button>`).join("");
+}
+function pushStatusHtml() {
+  const sup = push.support();
+  if (sup === "ios-install") return `<div class="push-box"><b>iPhone 要先加入主畫面才能收推播</b><ol><li>用 Safari 打開 xiatang-board.web.app</li><li>按下方「分享」→「加入主畫面」</li><li>從主畫面的「夏」圖示打開，再回到這裡按「開啟通知」</li></ol><span class="muted small">需要 iOS 16.4 以上</span></div>`;
+  if (sup === "in-app") return `<div class="push-box">LINE 等 App 內建的瀏覽器不能開通知，請按右上角「⋯」改用 Safari／Chrome 開啟。</div>`;
+  if (sup === "unsupported") return `<div class="push-box">這個瀏覽器不支援推播，請改用 Chrome，或把網站加到 iPhone 主畫面。</div>`;
+  if (push.isOn()) return `<div class="push-box on"><span>這台裝置的通知<b>已開啟</b></span><button class="btn sm ghost" id="push-off">關閉</button></div>`;
+  if (Notification.permission === "denied") return `<div class="push-box">你之前拒絕了通知。${push.isIOS() ? "請到 iPhone「設定」→「通知」→「夏躺」打開「允許通知」" : "請點網址列左邊的圖示 →「通知」改成允許"}，再回來按一次開啟。<button class="btn sm primary" id="push-on" style="margin-top:8px">開啟通知</button></div>`;
+  return `<div class="push-box"><span>開啟後，這台裝置會跳出推播通知</span><button class="btn sm primary" id="push-on">開啟通知</button></div>`;
+}
+function bellPanel() {
+  return `<div class="menu bell-panel" id="bell-panel">
+    <div class="bell-head"><b>通知</b>${S.notes.some((n) => !n.read) ? `<button class="btn sm ghost" id="read-all">全部標為已讀</button>` : ""}</div>
+    ${pushStatusHtml()}
+    <div class="bell-list" id="bell-list">${noteListHtml()}</div>
+  </div>`;
+}
+async function enablePush() {
+  // iPhone 規定：要在按下按鈕的當下「第一個」請求權限
+  const perm = await push.askPermission();
+  if (perm !== "granted") { toast(perm === "denied" ? "沒有允許通知" : "沒有開啟通知", true); render(); return false; }
+  try {
+    await push.register(fbApp, db, S.user.uid);
+    toast("這台裝置的通知已開啟");
+    render();
+    return true;
+  } catch (e) { toast("開啟通知失敗：" + (e.message || e), true); return false; }
+}
+function bindNoteItems() {
+  $$("[data-note]").forEach((b) => (b.onclick = async () => {
+    const n = S.notes.find((x) => x.id === b.dataset.note);
+    if (n && !n.read) updateDoc(doc(db, "notifications", n.id), { read: true }).catch(() => {});
+    S.ui.bell = false;
+    if (n?.link) location.hash = n.link.replace(/^#?/, "#"); else render();
+  }));
+}
+function bindBellPanel() {
+  if (!S.ui.bell) return;
+  bindNoteItems();
+  const ra = $("#read-all");
+  if (ra) ra.onclick = async () => {
+    const b = writeBatch(db);
+    S.notes.filter((n) => !n.read).forEach((n) => b.update(doc(db, "notifications", n.id), { read: true }));
+    await b.commit();
+  };
+  const pon = $("#push-on"); if (pon) pon.onclick = () => enablePush();
+  const poff = $("#push-off"); if (poff) poff.onclick = async () => { await push.unregister(fbApp, db); toast("已關閉這台裝置的通知"); render(); };
+}
+function pushPrompt() {
+  if (push.support() !== "ok" || push.isOn() || Notification.permission === "denied" || push.promptDismissed()) return "";
+  return `<div class="push-prompt"><div><b>開啟通知，新業配不漏接</b><span class="muted small">新業配、開發票、完成結算都會跳通知，手機鎖定也看得到。</span></div>
+    <div class="btn-row"><button class="btn primary sm" id="pp-on">開啟</button><button class="btn ghost sm" id="pp-no">不用了</button></div></div>`;
+}
+function bindPushPrompt() {
+  const on = $("#pp-on"), no = $("#pp-no");
+  if (on) on.onclick = async () => { if (await enablePush()) { push.dismissPrompt(); render(); } };
+  if (no) no.onclick = () => { push.dismissPrompt(); render(); };
+}
+async function logout() {
+  await push.forget(db).catch(() => {});
+  await signOut(auth);
+}
+
+/* =========================================================
    小元件
    ========================================================= */
 function toast(msg, bad) {
@@ -972,6 +1113,7 @@ async function copyText(text, msg) {
 }
 document.addEventListener("click", (e) => {
   if (S.ui.menu && !e.target.closest("#menu") && !e.target.closest("#me-btn")) { S.ui.menu = false; render(); }
+  if (S.ui.bell && !e.target.closest("#bell-panel") && !e.target.closest("#bell-btn") && !e.target.closest(".modal-bg")) { S.ui.bell = false; render(); }
 });
 
 /* =========================================================
@@ -1001,7 +1143,7 @@ function scheduleRender() {
 }
 let pendingRender = false;
 document.addEventListener("focusout", () => { if (pendingRender) { pendingRender = false; setTimeout(scheduleRender, 50); } });
-window.addEventListener("hashchange", () => { S.ui.menu = false; render(); window.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => { S.ui.menu = false; S.ui.bell = false; render(); window.scrollTo(0, 0); });
 
 function stopSubs() { unsubs.forEach((u) => u()); unsubs = []; }
 let subscribedRole = null;
@@ -1020,9 +1162,13 @@ function startDataSubs() {
   unsubs.push(onSnapshot(collection(db, "deals"), (qs) => { S.deals = qs.docs.map((d) => ({ id: d.id, ...d.data() })); S.loaded.deals = true; scheduleRender(); }));
   unsubs.push(onSnapshot(collection(db, "links"), (qs) => { S.links = qs.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => num(a.order) - num(b.order)); scheduleRender(); }));
   unsubs.push(onSnapshot(doc(db, "settings", "general"), (snap) => { S.settings = { ...DEFAULT_SETTINGS, ...(snap.data() || {}) }; scheduleRender(); }));
+  unsubs.push(onSnapshot(collection(db, "payments"), (qs) => { S.payments = Object.fromEntries(qs.docs.map((d) => [d.id, d.data()])); scheduleRender(); }));
+  unsubs.push(onSnapshot(query(collection(db, "notifications"), where("uid", "==", S.user.uid)), (qs) => {
+    S.notes = qs.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => noteMs(b) - noteMs(a)).slice(0, 60);
+    updateBell();
+  }));
   if (isAdmin()) {
     unsubs.push(onSnapshot(collection(db, "users"), (qs) => { S.users = qs.docs.map((d) => ({ id: d.id, ...d.data() })); scheduleRender(); }));
-    unsubs.push(onSnapshot(collection(db, "payments"), (qs) => { S.payments = Object.fromEntries(qs.docs.map((d) => [d.id, d.data()])); scheduleRender(); }));
     unsubs.push(onSnapshot(collection(db, "expenses"), (qs) => { S.expenses = qs.docs.map((d) => ({ id: d.id, ...d.data() })); scheduleRender(); }));
     unsubs.push(onSnapshot(collection(db, "quarters"), (qs) => { S.quarters = Object.fromEntries(qs.docs.map((d) => [d.id, d.data()])); scheduleRender(); }));
   }
@@ -1065,9 +1211,10 @@ onAuthStateChanged(auth, async (user) => {
     if (role() === "admin") await seedDefaults().catch((e) => console.warn(e));
     startDataSubs();
     render();
+    if (push.isOn()) push.register(fbApp, db, user.uid).catch(() => {});
   } catch (e) {
     console.error(e);
     app.innerHTML = `<div class="splash"><div class="splash-art"></div><div class="splash-panel"><h1>讀取失敗</h1><p>${esc(e.message || e)}</p><button class="btn" id="logout">登出</button></div></div>`;
-    $("#logout").onclick = () => signOut(auth);
+    $("#logout").onclick = () => logout();
   }
 });

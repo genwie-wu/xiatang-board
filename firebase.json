@@ -6,5 +6,8 @@
       { "source": "**/*.@(js|css|html|webmanifest)", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
     ]
   },
-  "firestore": { "rules": "firestore.rules" }
+  "firestore": { "rules": "firestore.rules" },
+  "functions": [
+    { "source": "functions", "codebase": "default", "runtime": "nodejs22", "ignore": ["node_modules", ".gitignore"] }
+  ]
 }
